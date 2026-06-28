@@ -3,85 +3,35 @@
 
 import json
 import os
+from pathlib import Path
 import requests
 import streamlit as st
-from google import genai as google_genai
 
 DAAD_BASE = "https://www2.daad.de"
-DAAD_SEARCH_API = (
-    f"{DAAD_BASE}/deutschland/studienangebote"
-    "/international-programmes/en/result/search.json"
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta"
+    "/models/gemini-1.5-flash:generateContent"
 )
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json, text/javascript, */*",
-    "Referer": (
-        f"{DAAD_BASE}/deutschland/studienangebote"
-        "/international-programmes/en/result/"
-    ),
-}
-DEFAULT_PARAMS = {
-    "cert": "", "admReq": "",
-    "langExamPC": "", "langExamLC": "", "langExamSC": "",
-    "degree[]": "", "subjectGroup[]": "",
-}
 
 
-# ── Data fetching (cached for 1 hour so repeat visitors are fast) ─────────────
+# ── Course loading (from pre-fetched JSON file) ───────────────────────────────
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_all_courses() -> tuple[list[dict], str | None]:
-    """Returns (courses, error_message). error_message is None on success."""
-    session = requests.Session()
-
-    # Visit the main page first so the session picks up any required cookies
+@st.cache_data(show_spinner=False)
+def load_courses() -> tuple[list[dict], str | None]:
+    courses_file = Path(__file__).parent / "courses.json"
+    if not courses_file.exists():
+        return [], (
+            "Course data not found. Please run `python fetch_data.py` locally "
+            "and push courses.json to the repository."
+        )
     try:
-        session.get(
-            f"{DAAD_BASE}/deutschland/studienangebote"
-            "/international-programmes/en/result/",
-            headers=HEADERS, timeout=15,
-        )
-    except Exception:
-        pass  # non-fatal — continue without cookies
-
-    all_courses: list[dict] = []
-    page = 1
-
-    while True:
-        params = {**DEFAULT_PARAMS, "page": page, "limit": 100}
-        try:
-            resp = session.get(DAAD_SEARCH_API, params=params,
-                               headers=HEADERS, timeout=30)
-            resp.raise_for_status()
-        except requests.HTTPError:
-            return [], f"DAAD returned HTTP {resp.status_code}. The site may be blocking requests from this server."
-        except requests.RequestException as exc:
-            return [], f"Network error: {exc}"
-
-        try:
-            data = resp.json()
-        except json.JSONDecodeError:
-            return [], f"DAAD returned unexpected content (not JSON). Preview: {resp.text[:300]}"
-
-        courses = (
-            data.get("courses") or data.get("results") or
-            data.get("items") or data.get("data") or []
-        )
-        if not courses:
-            if not all_courses:
-                return [], f"API responded but no courses found. Response keys: {list(data.keys())}"
-            break
-
-        all_courses.extend(courses)
-        total = int(data.get("total") or data.get("numFound") or data.get("count") or 0)
-        if (total and len(all_courses) >= total) or len(courses) < 100:
-            break
-        page += 1
-
-    return all_courses, None
+        data = json.loads(courses_file.read_text(encoding="utf-8"))
+        return data, None
+    except Exception as exc:
+        return [], f"Could not read courses.json: {exc}"
 
 
-# ── AI matching ───────────────────────────────────────────────────────────────
+# ── AI matching (direct HTTP — no SDK required) ───────────────────────────────
 
 def build_course_list(courses: list[dict]) -> str:
     lines = []
@@ -100,8 +50,6 @@ def build_course_list(courses: list[dict]) -> str:
 
 def rank_with_gemini(courses: list[dict], profile: str,
                      api_key: str, top_n: int) -> list[dict]:
-    client = google_genai.Client(api_key=api_key)
-
     prompt = f"""You are a university admissions advisor helping a student find the most \
 relevant English-taught international programmes at German universities.
 
@@ -112,7 +60,7 @@ AVAILABLE PROGRAMMES (index|name|subject|institution, city|fees|link):
 {build_course_list(courses)}
 
 Select the {top_n} most relevant programmes for this student. Return ONLY a valid \
-JSON array — no markdown, no explanation, just raw JSON:
+JSON array — no markdown, no extra text, just raw JSON:
 
 [
   {{
@@ -120,28 +68,30 @@ JSON array — no markdown, no explanation, just raw JSON:
     "name": "Programme Name",
     "institution": "University Name",
     "city": "City",
-    "why": "One sentence explaining why this fits the student's background and goals",
+    "why": "One sentence explaining why this fits the student",
     "link": "https://full-url"
   }}
 ]
 
 Be selective. Only include programmes with clear subject or career alignment."""
 
-    response = client.models.generate_content(
-        model="gemini-1.5-flash",
-        contents=prompt,
+    resp = requests.post(
+        f"{GEMINI_URL}?key={api_key}",
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2},
+        },
+        timeout=90,
     )
-    raw = response.text.strip()
+    resp.raise_for_status()
+    raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-    # Strip markdown code fences if Gemini wraps the JSON
+    # Strip markdown code fences if present
     if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1] if len(parts) > 1 else raw
+        raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    raw = raw.strip()
-
-    return json.loads(raw)
+    return json.loads(raw.strip())
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -153,7 +103,7 @@ def get_api_key() -> str:
         return os.getenv("GEMINI_API_KEY", "")
 
 
-# ── Page layout ───────────────────────────────────────────────────────────────
+# ── Page ──────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="DAAD Programme Finder",
@@ -186,49 +136,40 @@ top_n = st.slider(
 
 st.divider()
 
-search_clicked = st.button(
-    "🔍 Find My Programmes",
-    type="primary",
-    use_container_width=True,
-    disabled=not profile.strip(),
-)
+if st.button("🔍 Find My Programmes", type="primary",
+             use_container_width=True, disabled=not profile.strip()):
 
-if search_clicked:
     api_key = get_api_key()
     if not api_key:
         st.error("This app is not configured yet. Please contact the app owner.")
         st.stop()
 
-    with st.spinner("Fetching programmes from DAAD… (first load may take ~30 seconds)"):
-        courses, fetch_error = fetch_all_courses()
-
-    if fetch_error:
-        st.error(f"Could not load programmes: {fetch_error}")
+    courses, load_error = load_courses()
+    if load_error:
+        st.error(load_error)
         st.stop()
 
     with st.spinner(f"AI is reading your profile and picking the best {top_n} matches…"):
         try:
             results = rank_with_gemini(courses, profile, api_key, top_n)
-        except (json.JSONDecodeError, Exception) as e:
-            st.error(f"Something went wrong with the AI response. Please try again. ({e})")
+        except requests.HTTPError as exc:
+            st.error(f"Gemini API error: {exc.response.status_code} — check your API key.")
+            st.stop()
+        except (json.JSONDecodeError, KeyError):
+            st.error("AI returned an unexpected response. Please try again.")
             st.stop()
 
     st.success(f"Done! Here are your top {len(results)} recommended programmes.")
     st.divider()
 
     for item in results:
-        rank        = item.get("rank", "")
-        name        = item.get("name", "Unknown")
+        st.subheader(f"{item.get('rank', '')}. {item.get('name', 'Unknown')}")
         institution = item.get("institution", "")
-        city        = item.get("city", "")
-        why         = item.get("why", "")
-        link        = item.get("link", "")
-
-        st.subheader(f"{rank}. {name}")
+        city = item.get("city", "")
         if institution or city:
             st.caption(f"📍 {institution}, {city}")
-        if why:
-            st.write(f"**Why it fits you:** {why}")
-        if link:
-            st.link_button("View Programme on DAAD →", link)
+        if item.get("why"):
+            st.write(f"**Why it fits you:** {item['why']}")
+        if item.get("link"):
+            st.link_button("View Programme on DAAD →", item["link"])
         st.divider()
