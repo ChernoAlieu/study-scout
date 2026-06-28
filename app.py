@@ -8,10 +8,21 @@ import requests
 import streamlit as st
 
 DAAD_BASE = "https://www2.daad.de"
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta"
-    "/models/gemini-1.5-flash:generateContent"
-)
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+
+def get_gemini_model(api_key: str) -> str:
+    resp = requests.get(f"{GEMINI_BASE}/models?key={api_key}", timeout=10)
+    if resp.ok:
+        models = [
+            m["name"].split("/")[-1]
+            for m in resp.json().get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+            and "flash" in m["name"]
+        ]
+        if models:
+            return models[0]
+    return "gemini-2.0-flash"
 
 
 # ── Course loading (from pre-fetched JSON file) ───────────────────────────────
@@ -75,8 +86,10 @@ JSON array — no markdown, no extra text, just raw JSON:
 
 Be selective. Only include programmes with clear subject or career alignment."""
 
+    model = get_gemini_model(api_key)
+    url = f"{GEMINI_BASE}/models/{model}:generateContent"
     resp = requests.post(
-        f"{GEMINI_URL}?key={api_key}",
+        f"{url}?key={api_key}",
         json={
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.2},
