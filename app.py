@@ -5,7 +5,7 @@ import json
 import os
 import requests
 import streamlit as st
-import google.generativeai as genai
+from google import genai as google_genai
 
 DAAD_BASE = "https://www2.daad.de"
 DAAD_SEARCH_API = (
@@ -30,24 +30,46 @@ DEFAULT_PARAMS = {
 # ── Data fetching (cached for 1 hour so repeat visitors are fast) ─────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_all_courses() -> list[dict]:
+def fetch_all_courses() -> tuple[list[dict], str | None]:
+    """Returns (courses, error_message). error_message is None on success."""
+    session = requests.Session()
+
+    # Visit the main page first so the session picks up any required cookies
+    try:
+        session.get(
+            f"{DAAD_BASE}/deutschland/studienangebote"
+            "/international-programmes/en/result/",
+            headers=HEADERS, timeout=15,
+        )
+    except Exception:
+        pass  # non-fatal — continue without cookies
+
     all_courses: list[dict] = []
     page = 1
+
     while True:
         params = {**DEFAULT_PARAMS, "page": page, "limit": 100}
         try:
-            resp = requests.get(DAAD_SEARCH_API, params=params,
-                                headers=HEADERS, timeout=30)
+            resp = session.get(DAAD_SEARCH_API, params=params,
+                               headers=HEADERS, timeout=30)
             resp.raise_for_status()
+        except requests.HTTPError:
+            return [], f"DAAD returned HTTP {resp.status_code}. The site may be blocking requests from this server."
+        except requests.RequestException as exc:
+            return [], f"Network error: {exc}"
+
+        try:
             data = resp.json()
-        except Exception:
-            break
+        except json.JSONDecodeError:
+            return [], f"DAAD returned unexpected content (not JSON). Preview: {resp.text[:300]}"
 
         courses = (
             data.get("courses") or data.get("results") or
             data.get("items") or data.get("data") or []
         )
         if not courses:
+            if not all_courses:
+                return [], f"API responded but no courses found. Response keys: {list(data.keys())}"
             break
 
         all_courses.extend(courses)
@@ -56,7 +78,7 @@ def fetch_all_courses() -> list[dict]:
             break
         page += 1
 
-    return all_courses
+    return all_courses, None
 
 
 # ── AI matching ───────────────────────────────────────────────────────────────
@@ -78,8 +100,7 @@ def build_course_list(courses: list[dict]) -> str:
 
 def rank_with_gemini(courses: list[dict], profile: str,
                      api_key: str, top_n: int) -> list[dict]:
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    client = google_genai.Client(api_key=api_key)
 
     prompt = f"""You are a university admissions advisor helping a student find the most \
 relevant English-taught international programmes at German universities.
@@ -106,7 +127,10 @@ JSON array — no markdown, no explanation, just raw JSON:
 
 Be selective. Only include programmes with clear subject or career alignment."""
 
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-1.5-flash",
+        contents=prompt,
+    )
     raw = response.text.strip()
 
     # Strip markdown code fences if Gemini wraps the JSON
@@ -176,12 +200,10 @@ if search_clicked:
         st.stop()
 
     with st.spinner("Fetching programmes from DAAD… (first load may take ~30 seconds)"):
-        courses = fetch_all_courses()
+        courses, fetch_error = fetch_all_courses()
 
-    if not courses:
-        st.error(
-            "Could not reach DAAD right now. Please try again in a few minutes."
-        )
+    if fetch_error:
+        st.error(f"Could not load programmes: {fetch_error}")
         st.stop()
 
     with st.spinner(f"AI is reading your profile and picking the best {top_n} matches…"):
