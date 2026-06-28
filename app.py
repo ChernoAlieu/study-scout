@@ -44,6 +44,31 @@ def load_courses() -> tuple[list[dict], str | None]:
 
 # ── AI matching (direct HTTP — no SDK required) ───────────────────────────────
 
+STOPWORDS = {
+    "i", "a", "an", "the", "and", "or", "in", "of", "to", "my", "am",
+    "is", "are", "have", "has", "be", "also", "work", "as", "open", "any",
+    "for", "with", "related", "courses", "bsc", "msc", "degree",
+}
+
+def prefilter_courses(courses: list[dict], profile: str, max_candidates: int = 250) -> list[dict]:
+    keywords = {
+        w.lower().strip(".,") for w in profile.split()
+        if len(w) > 2 and w.lower() not in STOPWORDS
+    }
+    if not keywords:
+        return courses[:max_candidates]
+
+    def score(c: dict) -> int:
+        text = " ".join([
+            c.get("courseName") or "", c.get("name") or "",
+            c.get("subject") or "", c.get("description") or "",
+        ]).lower()
+        return sum(1 for kw in keywords if kw in text)
+
+    scored = sorted(courses, key=score, reverse=True)
+    return scored[:max_candidates]
+
+
 def build_course_list(courses: list[dict]) -> str:
     lines = []
     for i, c in enumerate(courses, 1):
@@ -61,6 +86,7 @@ def build_course_list(courses: list[dict]) -> str:
 
 def rank_with_gemini(courses: list[dict], profile: str,
                      api_key: str, top_n: int) -> list[dict]:
+    candidates = prefilter_courses(courses, profile, max_candidates=250)
     prompt = f"""You are a university admissions advisor helping a student find the most \
 relevant English-taught international programmes at German universities.
 
@@ -68,7 +94,7 @@ STUDENT PROFILE:
 {profile}
 
 AVAILABLE PROGRAMMES (index|name|subject|institution, city|fees|link):
-{build_course_list(courses)}
+{build_course_list(candidates)}
 
 Select the {top_n} most relevant programmes for this student. Return ONLY a valid \
 JSON array — no markdown, no extra text, just raw JSON:
@@ -94,7 +120,7 @@ Be selective. Only include programmes with clear subject or career alignment."""
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.2},
         },
-        timeout=90,
+        timeout=120,
     )
     resp.raise_for_status()
     raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
