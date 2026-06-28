@@ -18,14 +18,12 @@ HEADERS = {
         "/international-programmes/en/result/"
     ),
 }
-# English-taught, on-site + hybrid, tuition ≤500 EUR/semester
+# English-taught, all modes and fee levels
 BASE_PARAMS = {
     "cert": "", "admReq": "",
     "langExamPC": "", "langExamLC": "", "langExamSC": "",
     "langDeAvailable": "", "langEnAvailable": "",
     "lang[]": "2",           # 2 = English
-    "modStd[]": ["7", "2"],  # 7 = fully on-site, 2 = hybrid
-    "fee": "2",              # up to 500 EUR/semester
     "sort": "4",
     "dur": "", "q": "",
     "display": "list",
