@@ -159,7 +159,8 @@ if st.button("🔍 Find My Programmes", type="primary",
             elif code in (401, 403):
                 st.error(f"Gemini API error: {code} — invalid or unauthorised API key. Check your Streamlit secret.")
             else:
-                st.error(f"Gemini API error: {code}. Please try again.")
+                detail = exc.response.text[:500] if exc.response.text else "no body"
+                st.error(f"Gemini API error: {code}. Details: {detail}")
             st.stop()
         except (json.JSONDecodeError, KeyError):
             st.error("AI returned an unexpected response. Please try again.")
