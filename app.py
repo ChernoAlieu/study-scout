@@ -10,7 +10,7 @@ import streamlit as st
 DAAD_BASE = "https://www2.daad.de"
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta"
-    "/models/gemini-2.0-flash:generateContent"
+    "/models/gemini-1.5-flash:generateContent"
 )
 
 
@@ -153,7 +153,13 @@ if st.button("🔍 Find My Programmes", type="primary",
         try:
             results = rank_with_gemini(courses, profile, api_key, top_n)
         except requests.HTTPError as exc:
-            st.error(f"Gemini API error: {exc.response.status_code} — check your API key.")
+            code = exc.response.status_code
+            if code == 429:
+                st.error("Gemini API error: 429 — rate limit exceeded. Wait a moment and try again, or set up billing in Google AI Studio for higher limits.")
+            elif code in (401, 403):
+                st.error(f"Gemini API error: {code} — invalid or unauthorised API key. Check your Streamlit secret.")
+            else:
+                st.error(f"Gemini API error: {code}. Please try again.")
             st.stop()
         except (json.JSONDecodeError, KeyError):
             st.error("AI returned an unexpected response. Please try again.")
